@@ -3,14 +3,20 @@ name: 构建并发布Docker镜像
 on:
   push:
     branches:
-      - "main"
+      - "production"
     paths-ignore:
       - "README.md"
       - "docs/**"
   pull_request:
     branches:
-      - "main"
+      - "develop"
+      - "production"
   workflow_dispatch:
+
+# 同一分支只保留最新一次构建，避免连续推送浪费构建资源。
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-push:
@@ -37,27 +43,24 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.DOCKER }} 
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 提取Docker元数据
         id: meta
         uses: docker/metadata-action@v5
         with:
+          # metadata-action 会自动将镜像名称转换为小写。
           images: ghcr.io/${{ github.repository_owner }}/pansou
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=production,enable=${{ github.ref == 'refs/heads/production' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/production' }}
             type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: 构建并推送Docker镜像
         uses: docker/build-push-action@v5
         with:
           context: .
-          # 这是关键修改点
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

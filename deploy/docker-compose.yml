@@ -1,0 +1,44 @@
+name: pansou
+
+services:
+  pansou:
+    image: "${PANSOU_IMAGE:-ghcr.io/haipengtian/pansou:production}"
+    container_name: pansou
+    restart: unless-stopped
+    pull_policy: always
+
+    # 默认只允许本机反向代理访问，避免直接暴露未加密的 API。
+    ports:
+      - "${PANSOU_BIND_ADDRESS:-127.0.0.1}:${PANSOU_HOST_PORT:-8888}:8888"
+
+    env_file:
+      - .env
+    environment:
+      PORT: "8888"
+      # 公网部署模板强制配置认证信息，空值会让 Compose 拒绝启动。
+      AUTH_ENABLED: "${AUTH_ENABLED:-true}"
+      AUTH_USERS: "${AUTH_USERS:?请在 deploy/.env 中设置 AUTH_USERS}"
+      AUTH_JWT_SECRET: "${AUTH_JWT_SECRET:?请在 deploy/.env 中设置 AUTH_JWT_SECRET}"
+
+    volumes:
+      - pansou-cache:/app/cache
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pansou-cache:
+    name: pansou-cache

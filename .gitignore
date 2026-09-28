@@ -1,3 +1,6 @@
 .DS_Store
+/.idea/
 /cache
 /logs
+/deploy/.env
+/deploy/data/
