@@ -12,6 +12,7 @@ import (
 	"pansou/model"
 	"pansou/plugin"
 	"pansou/service"
+	"pansou/stats"
 )
 
 // registerAdminRoutes 在 api 路由组下注册 /admin/*，全部要求管理员。
@@ -26,6 +27,7 @@ func registerAdminRoutes(api *gin.RouterGroup) {
 	admin.POST("/users", CreateUserHandler)
 	admin.PATCH("/users/:name", UpdateUserHandler)
 	admin.DELETE("/users/:name", DeleteUserHandler)
+	registerStatsRoutes(admin)
 }
 
 func respondError(c *gin.Context, status int, message string) {
@@ -198,6 +200,9 @@ func RuntimeHandler(c *gin.Context) {
 		"plugin_backfill_enabled":      cfg.PluginBackfillEnabled,
 		"http_max_conns":               cfg.HTTPMaxConns,
 		"settings_seeded_from_env":     adminStore != nil && adminStore.SeededFromEnv(),
+		"stats_enabled":                statsStore != nil,
+		"stats_db_size_bytes":          statsDBSize(),
+		"stats_dropped_events":         statsRecorder.Dropped(),
 	}))
 }
 
@@ -210,6 +215,9 @@ type userView struct {
 	Source      string     `json:"source"`
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
+	// 搜索活跃度（统计可用时才有）
+	LastSearchAt  *time.Time `json:"last_search_at,omitempty"`
+	TodaySearches int        `json:"today_searches"`
 }
 
 func toUserView(u store.User) userView {
@@ -231,9 +239,20 @@ func ListUsersHandler(c *gin.Context) {
 		return
 	}
 	users := adminStore.Users()
+	var activity map[string]stats.UserActivity
+	if statsStore != nil {
+		// 活跃度只是附加信息，查询失败不影响用户列表。
+		activity, _ = statsStore.UserActivity(time.Now())
+	}
 	views := make([]userView, 0, len(users))
 	for _, u := range users {
-		views = append(views, toUserView(u))
+		view := toUserView(u)
+		if a, ok := activity[u.Username]; ok {
+			last := a.LastSearchAt
+			view.LastSearchAt = &last
+			view.TodaySearches = a.TodaySearches
+		}
+		views = append(views, view)
 	}
 	c.JSON(http.StatusOK, model.NewSuccessResponse(gin.H{"users": views}))
 }

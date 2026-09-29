@@ -4,10 +4,35 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"pansou/admin/store"
 	"pansou/config"
+	"pansou/stats"
 )
+
+// statsFileName 是搜索历史与访问统计数据库的文件名，与后台设置放在同一数据目录。
+const statsFileName = "stats.db"
+
+// adminDataDir 返回后台数据目录。
+func adminDataDir() string {
+	if dir := os.Getenv("PANSOU_DATA_DIR"); dir != "" {
+		return dir
+	}
+	return defaultDataDir
+}
+
+// openStats 打开统计数据库并启动异步记录器。失败时返回 nil，统计功能关闭、搜索不受影响。
+func openStats() (*stats.Store, *stats.Recorder) {
+	path := filepath.Join(adminDataDir(), statsFileName)
+	st, err := stats.Open(path)
+	if err != nil {
+		fmt.Printf("⚠️  统计数据库不可用，搜索历史与访问统计已关闭: %v\n", err)
+		return nil, nil
+	}
+	fmt.Printf("访问统计: 使用 %s\n", path)
+	return st, stats.NewRecorder(st, stats.RecorderOptions{})
+}
 
 // defaultDataDir 是后台数据（settings.json、users.json）的默认目录，相对于工作目录。
 // 一体镜像中工作目录为 /app，即落在 /app/data 持久卷内。
@@ -15,10 +40,7 @@ const defaultDataDir = "./data"
 
 // openAdminStore 打开后台存储。存储不可用意味着账号与设置都无法生效，因此直接终止启动。
 func openAdminStore() *store.Store {
-	dir := os.Getenv("PANSOU_DATA_DIR")
-	if dir == "" {
-		dir = defaultDataDir
-	}
+	dir := adminDataDir()
 
 	seed := store.Settings{
 		EnabledPlugins:  config.AppConfig.EnabledPlugins,

@@ -176,6 +176,10 @@ func startServer() {
 	// 设置首次由 ENABLED_PLUGINS/CHANNELS 播种，之后以管理后台的修改为准。
 	adminStore := openAdminStore()
 	api.SetAdminStore(adminStore)
+
+	// 搜索历史与访问统计（与后台设置同目录）；不可用时只影响统计，不影响搜索
+	statsStore, statsRecorder := openStats()
+	api.SetStats(statsStore, statsRecorder)
 	api.ApplySettings(pluginManager, adminStore.Settings())
 
 	// 初始化搜索服务
@@ -256,6 +260,12 @@ func startServer() {
 	// 优雅关闭服务器
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("服务器关闭异常: %v", err)
+	}
+
+	// 请求已处理完毕，把尚未落盘的统计写入后再关闭数据库
+	statsRecorder.Close()
+	if statsStore != nil {
+		_ = statsStore.Close()
 	}
 
 	fmt.Println("服务器已安全关闭")

@@ -23,6 +23,7 @@ func SetupRouter(searchService *service.SearchService) *gin.Engine {
 	// 添加中间件
 	r.Use(CORSMiddleware())
 	r.Use(LoggerMiddleware())
+	r.Use(StatsMiddleware())     // 接口访问量统计
 	r.Use(util.GzipMiddleware()) // 添加压缩中间件
 	r.Use(AuthMiddleware())      // 添加认证中间件
 

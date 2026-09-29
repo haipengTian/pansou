@@ -37,6 +37,9 @@ openssl rand -hex 32
 - 将 `AUTH_JWT_SECRET` 设置为刚生成的随机字符串。
 - 按需调整 `CHANNELS`、`ENABLED_PLUGINS` 和代理。它们只在首次启动时写入后台设置 `settings.json`（命名卷 `pansou-data`），之后请通过管理后台修改。
 
+搜索历史、登录记录与接口访问量记录在同一数据卷的 `stats.db`（SQLite），不限保留时间、会持续增长，
+可通过 `/api/admin/stats/*` 查询或导出。
+
 管理接口位于 `/api/admin/*`，只接受管理员令牌；网页版后台随 pansou-web 一体镜像提供（`/admin`）。
 
 然后启动：

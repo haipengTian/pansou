@@ -32,11 +32,13 @@ type LoginResponse struct {
 func LoginHandler(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		recordLogin(c, req.Username, false, loginReasonBadRequest)
 		c.JSON(400, gin.H{"error": "参数错误：用户名和密码不能为空"})
 		return
 	}
 
 	if adminStore == nil {
+		recordLogin(c, req.Username, false, loginReasonNoStore)
 		c.JSON(500, gin.H{"error": "认证系统未正确配置"})
 		return
 	}
@@ -46,6 +48,7 @@ func LoginHandler(c *gin.Context) {
 	limiterKeys := []string{"ip:" + c.ClientIP()}
 	if wait := loginGuard.retryAfter(limiterKeys...); wait > 0 {
 		seconds := int(math.Ceil(wait.Seconds()))
+		recordLogin(c, req.Username, false, loginReasonRateLimited)
 		c.Header("Retry-After", fmt.Sprint(seconds))
 		c.JSON(429, gin.H{"error": fmt.Sprintf("登录失败次数过多，请 %d 秒后再试", seconds)})
 		return
@@ -54,10 +57,12 @@ func LoginHandler(c *gin.Context) {
 	user, err := adminStore.Authenticate(req.Username, req.Password)
 	switch {
 	case errors.Is(err, store.ErrUserDisabled):
+		recordLogin(c, req.Username, false, loginReasonDisabled)
 		c.JSON(403, gin.H{"error": "账号已被禁用"})
 		return
 	case err != nil:
 		loginGuard.recordFailure(limiterKeys...)
+		recordLogin(c, req.Username, false, loginReasonInvalid)
 		c.JSON(401, gin.H{"error": "用户名或密码错误"})
 		return
 	}
@@ -77,6 +82,7 @@ func LoginHandler(c *gin.Context) {
 
 	now := time.Now()
 	adminStore.RecordLogin(user.Username, now)
+	recordLogin(c, user.Username, true, "")
 	c.JSON(200, LoginResponse{
 		Token:     token,
 		ExpiresAt: now.Add(config.AppConfig.AuthTokenExpiry).Unix(),

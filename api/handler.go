@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"time"
 	// "os"
 
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,13 @@ func SetSearchService(service *service.SearchService) {
 func SearchHandler(c *gin.Context) {
 	var req model.SearchRequest
 	var err error
+
+	// 搜索统计：请求结束后按最终状态码记录（异步，不影响响应）
+	started := time.Now()
+	statTotal, statErr := 0, ""
+	defer func() {
+		recordSearch(c, req, statTotal, c.Writer.Status(), statErr, started)
+	}()
 
 	// 根据请求方法不同处理参数
 	if c.Request.Method == http.MethodGet {
@@ -230,6 +238,7 @@ func SearchHandler(c *gin.Context) {
 	result, err := searchService.Search(req.Keyword, req.Channels, req.Concurrency, req.ForceRefresh, req.ResultType, req.SourceType, req.Plugins, req.CloudTypes, req.Ext)
 
 	if err != nil {
+		statErr = err.Error()
 		response := model.NewErrorResponse(500, "搜索失败: "+err.Error())
 		jsonData, _ := jsonutil.Marshal(response)
 		c.Data(http.StatusInternalServerError, "application/json", jsonData)
@@ -240,6 +249,8 @@ func SearchHandler(c *gin.Context) {
 	if req.Filter != nil {
 		result = applyResultFilter(result, req.Filter, req.ResultType)
 	}
+
+	statTotal = result.Total
 
 	// 包装SearchResponse到标准响应格式中
 	response := model.NewSuccessResponse(result)
