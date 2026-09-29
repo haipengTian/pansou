@@ -17,11 +17,15 @@ services:
       PORT: "8888"
       # 公网部署模板强制配置认证信息，空值会让 Compose 拒绝启动。
       AUTH_ENABLED: "${AUTH_ENABLED:-true}"
-      AUTH_USERS: "${AUTH_USERS:?请在 deploy/.env 中设置 AUTH_USERS}"
+      # ADMIN_USERS 是管理后台的救急管理员账号（后台只读）；客户账号请在 /admin 中创建。
+      ADMIN_USERS: "${ADMIN_USERS:?请在 deploy/.env 中设置 ADMIN_USERS}"
+      AUTH_USERS: "${AUTH_USERS:-}"
       AUTH_JWT_SECRET: "${AUTH_JWT_SECRET:?请在 deploy/.env 中设置 AUTH_JWT_SECRET}"
 
     volumes:
       - pansou-cache:/app/cache
+      # 管理后台的设置与账号（settings.json、users.json）
+      - pansou-data:/app/data
 
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/api/health"]
@@ -42,3 +46,5 @@ services:
 volumes:
   pansou-cache:
     name: pansou-cache
+  pansou-data:
+    name: pansou-data

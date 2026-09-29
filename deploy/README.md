@@ -32,9 +32,12 @@ openssl rand -hex 32
 
 编辑 `.env`：
 
-- 将 `AUTH_USERS` 设置为 `用户名:强密码`。
+- 将 `ADMIN_USERS` 设置为 `管理员名:强密码`（管理后台账号，后台中只读）。
+- 客户账号建议登录管理后台后在「用户管理」中创建；`AUTH_USERS` 仅为兼容旧版保留。
 - 将 `AUTH_JWT_SECRET` 设置为刚生成的随机字符串。
-- 按需调整 `CHANNELS`、`ENABLED_PLUGINS` 和代理。
+- 按需调整 `CHANNELS`、`ENABLED_PLUGINS` 和代理。它们只在首次启动时写入后台设置 `settings.json`（命名卷 `pansou-data`），之后请通过管理后台修改。
+
+管理接口位于 `/api/admin/*`，只接受管理员令牌；网页版后台随 pansou-web 一体镜像提供（`/admin`）。
 
 然后启动：
 
@@ -76,7 +79,9 @@ cd /opt/pansou/deploy
 ./update.sh
 ```
 
-命名卷 `pansou-cache` 会在更新容器时保留缓存。
+命名卷 `pansou-cache` 会在更新容器时保留缓存，`pansou-data` 保留后台设置与账号。
+
+从未含管理后台的版本升级时，先在 `.env` 中新增 `ADMIN_USERS`，否则 `./update.sh` 会在校验阶段报错（旧容器不受影响）。原 `AUTH_USERS` 账号继续可用，身份变为普通用户。
 
 ## 5. 回滚
 
