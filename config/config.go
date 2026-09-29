@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -81,6 +84,7 @@ type Config struct {
 	// 认证相关配置
 	AuthEnabled     bool              // 是否启用认证
 	AuthUsers       map[string]string // 用户名:密码映射
+	AdminUsers      map[string]string // 管理员 用户名:密码映射（ADMIN_USERS），后台只读的救急账号
 	AuthTokenExpiry time.Duration     // Token有效期
 	AuthJWTSecret   string            // JWT签名密钥
 
@@ -149,6 +153,7 @@ func Init() {
 		// 认证相关配置
 		AuthEnabled:     getAuthEnabled(),
 		AuthUsers:       getAuthUsers(),
+		AdminUsers:      getAdminUsers(),
 		AuthTokenExpiry: getAuthTokenExpiry(),
 		AuthJWTSecret:   getAuthJWTSecret(),
 	}
@@ -206,6 +211,7 @@ func getDefaultConcurrency() int {
 
 // 更新默认并发数（根据实际插件数或0调用）
 // pluginCount: 如果插件被禁用则为0，否则为实际插件数
+// 启动时与后台修改频道/插件后都会调用，结果写入运行期原子变量，读取见 DefaultConcurrency。
 func UpdateDefaultConcurrency(pluginCount int) {
 	if AppConfig == nil {
 		return
@@ -217,17 +223,13 @@ func UpdateDefaultConcurrency(pluginCount int) {
 		return
 	}
 
-	// 计算频道数
-	channelCount := len(AppConfig.DefaultChannels)
-
 	// 计算并发数 = 频道数 + 插件数（插件禁用时为0）+ 10
-	concurrency := channelCount + pluginCount + 10
+	concurrency := len(DefaultChannels()) + pluginCount + 10
 	if concurrency < 1 {
 		concurrency = 1 // 确保至少为1
 	}
 
-	// 更新配置
-	AppConfig.DefaultConcurrency = concurrency
+	runtimeConcurrency.Store(int64(concurrency))
 }
 
 // 从环境变量获取服务端口，如果未设置则使用默认值
@@ -788,7 +790,16 @@ func getAuthEnabled() bool {
 
 // 从环境变量获取用户配置，格式：user1:pass1,user2:pass2
 func getAuthUsers() map[string]string {
-	usersEnv := os.Getenv("AUTH_USERS")
+	return parseUserPairs(os.Getenv("AUTH_USERS"))
+}
+
+// 从环境变量获取管理员账号（格式同 AUTH_USERS）
+func getAdminUsers() map[string]string {
+	return parseUserPairs(os.Getenv("ADMIN_USERS"))
+}
+
+// parseUserPairs 解析 "user1:pass1,user2:pass2"；为空时返回 nil。
+func parseUserPairs(usersEnv string) map[string]string {
 	if usersEnv == "" {
 		return nil
 	}
@@ -824,17 +835,17 @@ func getAuthTokenExpiry() time.Duration {
 // 从环境变量获取JWT密钥，如果未设置则生成随机密钥
 func getAuthJWTSecret() string {
 	secret := os.Getenv("AUTH_JWT_SECRET")
-	if secret == "" {
-		// 生成随机密钥（32字节）
-		import_crypto := "crypto/rand"
-		import_encoding := "encoding/base64"
-		_ = import_crypto
-		_ = import_encoding
-		// 注意：实际使用时应该使用crypto/rand生成随机密钥
-		// 这里为了简化，使用时间戳作为临时密钥
-		secret = "pansou-default-secret-" + strconv.FormatInt(time.Now().Unix(), 10)
+	if secret != "" {
+		return secret
 	}
-	return secret
+	// 未配置时生成进程级随机密钥：重启后旧令牌全部失效，但不可被预测或伪造。
+	// 原实现用"固定前缀 + 启动时间戳"，知道大致启动时间即可伪造任意用户的令牌。
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		panic("生成 JWT 随机密钥失败: " + err.Error())
+	}
+	fmt.Println("⚠️  未设置 AUTH_JWT_SECRET，已生成临时随机密钥，重启后所有登录会失效")
+	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // 应用GC设置

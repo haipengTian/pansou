@@ -1,9 +1,13 @@
 package api
 
 import (
+	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"pansou/admin/store"
 	"pansou/config"
 	"pansou/util"
 )
@@ -19,9 +23,12 @@ type LoginResponse struct {
 	Token     string `json:"token"`
 	ExpiresAt int64  `json:"expires_at"`
 	Username  string `json:"username"`
+	Role      string `json:"role"`
 }
 
 // LoginHandler 处理用户登录
+//
+// 不再受 AUTH_ENABLED 限制：客户可以免登录，但管理员必须能登录后台。
 func LoginHandler(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -29,28 +36,37 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	// 验证认证系统是否启用
-	if !config.AppConfig.AuthEnabled {
-		c.JSON(403, gin.H{"error": "认证功能未启用"})
-		return
-	}
-
-	// 验证用户配置是否存在
-	if config.AppConfig.AuthUsers == nil || len(config.AppConfig.AuthUsers) == 0 {
+	if adminStore == nil {
 		c.JSON(500, gin.H{"error": "认证系统未正确配置"})
 		return
 	}
 
-	// 验证用户名和密码
-	storedPassword, exists := config.AppConfig.AuthUsers[req.Username]
-	if !exists || storedPassword != req.Password {
-		c.JSON(401, gin.H{"error": "用户名或密码错误"})
+	// 只按客户端 IP 计数：按用户名锁定会让任何人都能把管理员锁在门外。
+	// ClientIP 仅采信可信代理转发的地址，见 configureTrustedProxies。
+	limiterKeys := []string{"ip:" + c.ClientIP()}
+	if wait := loginGuard.retryAfter(limiterKeys...); wait > 0 {
+		seconds := int(math.Ceil(wait.Seconds()))
+		c.Header("Retry-After", fmt.Sprint(seconds))
+		c.JSON(429, gin.H{"error": fmt.Sprintf("登录失败次数过多，请 %d 秒后再试", seconds)})
 		return
 	}
 
-	// 生成JWT token
-	token, err := util.GenerateToken(
-		req.Username,
+	user, err := adminStore.Authenticate(req.Username, req.Password)
+	switch {
+	case errors.Is(err, store.ErrUserDisabled):
+		c.JSON(403, gin.H{"error": "账号已被禁用"})
+		return
+	case err != nil:
+		loginGuard.recordFailure(limiterKeys...)
+		c.JSON(401, gin.H{"error": "用户名或密码错误"})
+		return
+	}
+	loginGuard.recordSuccess(limiterKeys...)
+
+	token, err := util.GenerateTokenFor(
+		user.Username,
+		string(user.Role),
+		user.TokenVersion,
 		config.AppConfig.AuthJWTSecret,
 		config.AppConfig.AuthTokenExpiry,
 	)
@@ -59,18 +75,27 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	// 返回token和过期时间
-	expiresAt := time.Now().Add(config.AppConfig.AuthTokenExpiry).Unix()
+	now := time.Now()
+	adminStore.RecordLogin(user.Username, now)
 	c.JSON(200, LoginResponse{
 		Token:     token,
-		ExpiresAt: expiresAt,
-		Username:  req.Username,
+		ExpiresAt: now.Add(config.AppConfig.AuthTokenExpiry).Unix(),
+		Username:  user.Username,
+		Role:      string(user.Role),
 	})
 }
 
-// VerifyHandler 验证token有效性
+// VerifyHandler 验证token有效性并返回当前身份
 func VerifyHandler(c *gin.Context) {
-	// 如果未启用认证，直接返回有效
+	if username, ok := c.Get(ctxUsername); ok {
+		c.JSON(200, gin.H{
+			"valid":    true,
+			"username": username,
+			"role":     currentRole(c),
+		})
+		return
+	}
+
 	if !config.AppConfig.AuthEnabled {
 		c.JSON(200, gin.H{
 			"valid":   true,
@@ -79,17 +104,7 @@ func VerifyHandler(c *gin.Context) {
 		return
 	}
 
-	// 如果能到达这里，说明中间件已经验证通过
-	username, exists := c.Get("username")
-	if !exists {
-		c.JSON(401, gin.H{"error": "未授权"})
-		return
-	}
-
-	c.JSON(200, gin.H{
-		"valid":    true,
-		"username": username,
-	})
+	c.JSON(401, gin.H{"error": "未授权"})
 }
 
 // LogoutHandler 退出登录（客户端删除token即可）

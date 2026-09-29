@@ -20,6 +20,9 @@ var searchService *service.SearchService
 // SetSearchService 设置搜索服务实例
 func SetSearchService(service *service.SearchService) {
 	searchService = service
+	if service != nil {
+		adminPlugins = service.GetPluginManager()
+	}
 }
 
 // SearchHandler 搜索处理函数
@@ -184,9 +187,14 @@ func SearchHandler(c *gin.Context) {
 		return
 	}
 
+	// 非管理员只能在后台允许的范围内选择频道与网盘类型
+	if adminStore != nil && !isAdminRequest(c) {
+		req = restrictSearchRequest(req, adminStore.Settings())
+	}
+
 	// 检查并设置默认值
 	if len(req.Channels) == 0 {
-		req.Channels = config.AppConfig.DefaultChannels
+		req.Channels = config.DefaultChannels()
 	}
 
 	// 如果未指定结果类型，默认返回merge并转换为merged_by_type

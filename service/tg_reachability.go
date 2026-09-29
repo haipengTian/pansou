@@ -204,8 +204,8 @@ func logTGProbeResult(reachable bool, reason string) {
 // 因为"首页能开但 /s/ 路径被单独阻断"是可能发生的，探测必须覆盖真正要走的路径。
 func tgProbeURL() string {
 	channel := ""
-	if config.AppConfig != nil && len(config.AppConfig.DefaultChannels) > 0 {
-		channel = config.AppConfig.DefaultChannels[0]
+	if channels := config.DefaultChannels(); len(channels) > 0 {
+		channel = channels[0]
 	}
 	if channel == "" {
 		return "https://t.me/"

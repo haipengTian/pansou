@@ -8,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"pansou/config"
-	"pansou/util"
 )
 
 // CORSMiddleware 跨域中间件
@@ -74,68 +73,46 @@ func LoggerMiddleware() gin.HandlerFunc {
 	}
 }
 
+// authPublicPaths 在启用认证时也无需令牌的接口。
+var authPublicPaths = []string{
+	"/api/auth/login",
+	"/api/auth/logout",
+	"/api/health", // 仅返回存活状态，供容器健康检查使用
+}
+
 // AuthMiddleware JWT认证中间件
+//
+// 无论是否启用认证，只要请求携带有效令牌就解析出身份写入上下文，供 RequireAdmin
+// 与搜索参数约束使用；AUTH_ENABLED 只决定"没有有效令牌的请求能否继续"。
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 如果未启用认证，直接放行
-		if !config.AppConfig.AuthEnabled {
+		id, err := resolveIdentity(c)
+		if id != nil {
+			c.Set(ctxUsername, id.Username)
+			c.Set(ctxRole, id.Role)
+		}
+
+		if !config.AppConfig.AuthEnabled || isAuthPublicPath(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
-		// 定义公开接口（不需要认证）
-		publicPaths := []string{
-			"/api/auth/login",
-			"/api/auth/logout",
-			"/api/health", // 健康检查接口可选择是否需要认证
-		}
-
-		// 检查当前路径是否是公开接口
-		path := c.Request.URL.Path
-		for _, p := range publicPaths {
-			if strings.HasPrefix(path, p) {
-				c.Next()
-				return
-			}
-		}
-
-		// 获取Authorization头
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(401, gin.H{
-				"error": "未授权：缺少认证令牌",
-				"code":  "AUTH_TOKEN_MISSING",
-			})
-			c.Abort()
-			return
-		}
-
-		// 解析Bearer token
-		const bearerPrefix = "Bearer "
-		if !strings.HasPrefix(authHeader, bearerPrefix) {
-			c.JSON(401, gin.H{
-				"error": "未授权：令牌格式错误",
-				"code":  "AUTH_TOKEN_INVALID_FORMAT",
-			})
-			c.Abort()
-			return
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, bearerPrefix)
-
-		// 验证token
-		claims, err := util.ValidateToken(tokenString, config.AppConfig.AuthJWTSecret)
 		if err != nil {
-			c.JSON(401, gin.H{
-				"error": "未授权：令牌无效或已过期",
-				"code":  "AUTH_TOKEN_INVALID",
+			c.AbortWithStatusJSON(401, gin.H{
+				"error": err.Error(),
+				"code":  tokenErrorCode(err),
 			})
-			c.Abort()
 			return
 		}
-
-		// 将用户信息存入上下文，供后续处理使用
-		c.Set("username", claims.Username)
 		c.Next()
 	}
+}
+
+func isAuthPublicPath(path string) bool {
+	for _, p := range authPublicPaths {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+	return false
 }

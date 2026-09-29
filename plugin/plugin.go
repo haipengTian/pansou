@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -213,34 +214,77 @@ func GetPluginByName(name string) (AsyncSearchPlugin, bool) {
 }
 
 // PluginManager 异步插件管理器
+//
+// 启用中的插件以不可变切片快照保存：搜索路径通过 GetPlugins 无锁读取，
+// 后台修改启用列表时整体替换快照，正在进行的搜索继续使用它拿到的旧快照。
 type PluginManager struct {
-	plugins []AsyncSearchPlugin
+	mu          sync.Mutex // 串行化启停与初始化
+	initialized map[string]bool
+	enabled     atomic.Pointer[[]AsyncSearchPlugin]
+	// candidates 返回可被启用的全部插件，默认是全局注册表；测试可替换。
+	candidates func() []AsyncSearchPlugin
+}
+
+// EnableResult 描述一次 SetEnabled 的结果。
+type EnableResult struct {
+	Enabled []string          // 实际启用的插件（按名称排序）
+	Unknown []string          // 请求启用但未注册的插件名
+	Failed  map[string]string // 初始化失败而未启用的插件及原因
 }
 
 // NewPluginManager 创建新的异步插件管理器
 func NewPluginManager() *PluginManager {
-	return &PluginManager{
-		plugins: make([]AsyncSearchPlugin, 0),
+	pm := &PluginManager{
+		initialized: make(map[string]bool),
+		candidates:  GetRegisteredPlugins,
 	}
+	empty := make([]AsyncSearchPlugin, 0)
+	pm.enabled.Store(&empty)
+	return pm
+}
+
+// initOnceLocked 对实现了 InitializablePlugin 的插件执行一次初始化；
+// 失败不记为已初始化，下次启用时会重试。调用方必须持有 pm.mu。
+func (pm *PluginManager) initOnceLocked(plugin AsyncSearchPlugin) error {
+	name := plugin.Name()
+	if pm.initialized[name] {
+		return nil
+	}
+	if initPlugin, ok := plugin.(InitializablePlugin); ok {
+		if err := initPlugin.Initialize(); err != nil {
+			return err
+		}
+	}
+	pm.initialized[name] = true
+	return nil
 }
 
 // RegisterPlugin 注册异步插件
 func (pm *PluginManager) RegisterPlugin(plugin AsyncSearchPlugin) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
 	// 如果插件支持延迟初始化，先执行初始化
-	if initPlugin, ok := plugin.(InitializablePlugin); ok {
-		if err := initPlugin.Initialize(); err != nil {
-			fmt.Printf("[PluginManager] 插件 %s 初始化失败: %v，跳过注册\n", plugin.Name(), err)
+	if err := pm.initOnceLocked(plugin); err != nil {
+		fmt.Printf("[PluginManager] 插件 %s 初始化失败: %v，跳过注册\n", plugin.Name(), err)
+		return
+	}
+
+	current := *pm.enabled.Load()
+	for _, existing := range current {
+		if existing.Name() == plugin.Name() {
 			return
 		}
 	}
-
-	pm.plugins = append(pm.plugins, plugin)
+	next := make([]AsyncSearchPlugin, 0, len(current)+1)
+	next = append(next, current...)
+	next = append(next, plugin)
+	pm.enabled.Store(&next)
 }
 
 // RegisterAllGlobalPlugins 注册所有全局异步插件
 func (pm *PluginManager) RegisterAllGlobalPlugins() {
-	allPlugins := GetRegisteredPlugins()
-	for _, plugin := range allPlugins {
+	for _, plugin := range pm.candidates() {
 		pm.RegisterPlugin(plugin)
 	}
 }
@@ -248,14 +292,6 @@ func (pm *PluginManager) RegisterAllGlobalPlugins() {
 // RegisterGlobalPluginsWithFilter 根据过滤器注册全局异步插件
 // enabledPlugins: nil表示未设置（不启用任何插件），空切片表示设置为空（不启用任何插件），具体列表表示启用指定插件
 func (pm *PluginManager) RegisterGlobalPluginsWithFilter(enabledPlugins []string) {
-	allPlugins := GetRegisteredPlugins()
-
-	// nil 表示未设置环境变量，不启用任何插件
-	if enabledPlugins == nil {
-		return
-	}
-
-	// 空切片表示设置为空字符串，也不启用任何插件
 	if len(enabledPlugins) == 0 {
 		return
 	}
@@ -267,16 +303,73 @@ func (pm *PluginManager) RegisterGlobalPluginsWithFilter(enabledPlugins []string
 	}
 
 	// 只注册在启用列表中的插件
-	for _, plugin := range allPlugins {
+	for _, plugin := range pm.candidates() {
 		if enabledMap[plugin.Name()] {
 			pm.RegisterPlugin(plugin)
 		}
 	}
 }
 
-// GetPlugins 获取所有注册的异步插件
+// SetEnabled 在运行期把启用列表整体替换为 names。
+// 新启用的插件按需初始化（每个插件只成功初始化一次），初始化失败的插件不会启用。
+func (pm *PluginManager) SetEnabled(names []string) EnableResult {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+
+	result := EnableResult{Failed: map[string]string{}}
+	next := make([]AsyncSearchPlugin, 0, len(names))
+	for _, plugin := range sortedByName(pm.candidates()) {
+		name := plugin.Name()
+		if !wanted[name] {
+			continue
+		}
+		delete(wanted, name)
+		if err := pm.initOnceLocked(plugin); err != nil {
+			result.Failed[name] = err.Error()
+			fmt.Printf("[PluginManager] 插件 %s 初始化失败: %v，未启用\n", name, err)
+			continue
+		}
+		next = append(next, plugin)
+		result.Enabled = append(result.Enabled, name)
+	}
+	for name := range wanted {
+		result.Unknown = append(result.Unknown, name)
+	}
+	sort.Strings(result.Unknown)
+
+	pm.enabled.Store(&next)
+	return result
+}
+
+// IsEnabled 报告插件当前是否启用。
+func (pm *PluginManager) IsEnabled(name string) bool {
+	for _, plugin := range *pm.enabled.Load() {
+		if plugin.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// AllPlugins 返回全部可启用的插件（按名称排序），不论当前是否启用。
+func (pm *PluginManager) AllPlugins() []AsyncSearchPlugin {
+	return sortedByName(pm.candidates())
+}
+
+// GetPlugins 获取当前启用的异步插件快照。返回的切片是共享的只读快照，调用方不得修改。
 func (pm *PluginManager) GetPlugins() []AsyncSearchPlugin {
-	return pm.plugins
+	return *pm.enabled.Load()
+}
+
+func sortedByName(plugins []AsyncSearchPlugin) []AsyncSearchPlugin {
+	sorted := append([]AsyncSearchPlugin(nil), plugins...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name() < sorted[j].Name() })
+	return sorted
 }
 
 // ============================================================

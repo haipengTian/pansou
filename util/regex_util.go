@@ -64,6 +64,12 @@ var Pan115PasswordPattern = regexp.MustCompile(`password=([a-zA-Z0-9]{4})`)
 // 123 网盘 URL 中的提取码（兼容 URL 编码）
 var Pan123ExtractCodePattern = regexp.MustCompile(`(?:提取码|%E6%8F%90%E5%8F%96%E7%A0%81)[:：]([a-zA-Z0-9]+)`)
 
+// LinkTypes 是 GetLinkType 可能返回的全部网盘类型，新增类型时需同步维护。
+var LinkTypes = []string{
+	"baidu", "quark", "aliyun", "guangya", "tianyi", "uc", "mobile", "115",
+	"pikpak", "xunlei", "123", "magnet", "ed2k", "others",
+}
+
 // GetLinkType 获取链接类型
 func GetLinkType(url string) string {
 	url = strings.ToLower(url)

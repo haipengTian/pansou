@@ -8,13 +8,23 @@ import (
 )
 
 // Claims JWT载荷结构
+//
+// Role 仅供客户端展示；服务端鉴权以账号存储中的当前角色为准。
+// Version 对应账号的 TokenVersion，禁用、改密、改角色后旧令牌因版本不符而失效。
 type Claims struct {
 	Username string `json:"username"`
+	Role     string `json:"role,omitempty"`
+	Version  int    `json:"ver,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// GenerateToken 生成JWT token
+// GenerateToken 生成JWT token（不带角色与版本，保留给旧调用方）
 func GenerateToken(username string, secret string, expiry time.Duration) (string, error) {
+	return GenerateTokenFor(username, "", 0, secret, expiry)
+}
+
+// GenerateTokenFor 生成带角色与令牌版本的JWT token
+func GenerateTokenFor(username, role string, version int, secret string, expiry time.Duration) (string, error) {
 	if username == "" {
 		return "", errors.New("username cannot be empty")
 	}
@@ -25,6 +35,8 @@ func GenerateToken(username string, secret string, expiry time.Duration) (string
 	expirationTime := time.Now().Add(expiry)
 	claims := &Claims{
 		Username: username,
+		Role:     role,
+		Version:  version,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

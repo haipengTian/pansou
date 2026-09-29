@@ -18,6 +18,7 @@ func SetupRouter(searchService *service.SearchService) *gin.Engine {
 
 	// 创建默认路由
 	r := gin.Default()
+	configureTrustedProxies(r, trustedProxiesFromEnv())
 
 	// 添加中间件
 	r.Use(CORSMiddleware())
@@ -41,59 +42,45 @@ func SetupRouter(searchService *service.SearchService) *gin.Engine {
 		api.GET("/search", SearchHandler) // 添加GET方式支持
 		api.POST("/check/links", CheckHandler)
 
-		// 健康检查接口
-		api.GET("/health", func(c *gin.Context) {
-			// 根据配置决定是否返回插件信息
-			pluginCount := 0
-			pluginNames := []string{}
-			pluginsEnabled := config.AppConfig.AsyncPluginEnabled
+		// 健康检查接口：公开，仅返回存活状态；完整运行状态见 /api/admin/health
+		api.GET("/health", PublicHealthHandler)
 
-			if pluginsEnabled && searchService != nil && searchService.GetPluginManager() != nil {
-				plugins := searchService.GetPluginManager().GetPlugins()
-				pluginCount = len(plugins)
-				for _, p := range plugins {
-					pluginNames = append(pluginNames, p.Name())
-				}
-			}
+		// 当前用户可选的频道/插件/网盘类型（启用认证时需登录）
+		api.GET("/search/options", SearchOptionsHandler)
 
-			// 获取频道信息
-			channels := config.AppConfig.DefaultChannels
-			channelsCount := len(channels)
-
-			response := gin.H{
-				"status":          "ok",
-				"auth_enabled":    config.AppConfig.AuthEnabled, // 添加认证状态
-				"plugins_enabled": pluginsEnabled,
-				"channels":        channels,
-				"channels_count":  channelsCount,
-				// 存活观测：累积每轮产出/报错，一眼看出哪些插件与频道是失效的。
-				// 只报事实不做淘汰——窗口内零产出不代表无数据（内容仍会经后台补齐进缓存），
-				// 是否停用由部署方按这里的名单决定。
-				"liveness": service.LivenessSnapshot(),
-				// TG 可达性：被墙时 TG 阶段会被直接跳过，这里给出结论、原因与探测时间。
-				"tg": service.TGReachabilitySnapshot(),
-			}
-
-			// 只有当插件启用时才返回插件相关信息
-			if pluginsEnabled {
-				response["plugin_count"] = pluginCount
-				response["plugins"] = pluginNames
-			}
-
-			c.JSON(200, response)
-		})
+		// 管理后台接口（始终要求管理员）
+		registerAdminRoutes(api)
 	}
 
-	// 注册插件的Web路由（如果插件实现了PluginWithWebHandler接口）
-	// 只有当插件功能启用且插件在启用列表中时才注册路由
-	if config.AppConfig.AsyncPluginEnabled && searchService != nil && searchService.GetPluginManager() != nil {
-		enabledPlugins := searchService.GetPluginManager().GetPlugins()
-		for _, p := range enabledPlugins {
-			if webPlugin, ok := p.(plugin.PluginWithWebHandler); ok {
-				webPlugin.RegisterWebRoutes(r.Group(""))
-			}
-		}
-	}
+	registerPluginWebRoutes(r, searchService)
 
 	return r
+}
+
+// registerPluginWebRoutes 为全部带管理页的插件注册路由（qqpd、gying、weibo 等数据源账号管理）。
+//
+// 这些页面管理的是全站共用的数据源账号，只允许管理员访问。路由在启动时一次性注册，
+// 插件在后台被停用时由守卫返回 404，从而支持运行期启停而无需动态增删 gin 路由。
+func registerPluginWebRoutes(r *gin.Engine, searchService *service.SearchService) {
+	if !config.AppConfig.AsyncPluginEnabled || searchService == nil || searchService.GetPluginManager() == nil {
+		return
+	}
+	pm := searchService.GetPluginManager()
+	for _, p := range pm.AllPlugins() {
+		webPlugin, ok := p.(plugin.PluginWithWebHandler)
+		if !ok {
+			continue
+		}
+		webPlugin.RegisterWebRoutes(r.Group("", RequireAdmin(), requirePluginEnabled(pm, p.Name())))
+	}
+}
+
+func requirePluginEnabled(pm *plugin.PluginManager, name string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !pm.IsEnabled(name) {
+			c.AbortWithStatusJSON(404, gin.H{"error": "插件未启用: " + name})
+			return
+		}
+		c.Next()
+	}
 }

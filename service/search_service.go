@@ -441,8 +441,9 @@ func injectMainCacheToAsyncPlugins(pluginManager *plugin.PluginManager, mainCach
 		return mergeIntoMainCache(mainCache, key, newResults, ttl, isFinal, keyword, pluginName)
 	}
 
-	// 获取所有插件
-	plugins := pluginManager.GetPlugins()
+	// 注入到全部已注册插件而不只是当前启用的：后台可在运行期启用新插件，
+	// 它们同样需要把后台补齐的结果回写主缓存。
+	plugins := pluginManager.AllPlugins()
 
 	// 遍历所有插件，找出异步插件
 	for _, p := range plugins {
@@ -539,7 +540,7 @@ func (s *SearchService) Search(keyword string, channels []string, concurrency in
 
 	// 如果未指定并发数，使用配置中的默认值
 	if concurrency <= 0 {
-		concurrency = config.AppConfig.DefaultConcurrency
+		concurrency = config.DefaultConcurrency()
 	}
 
 	// 并行获取TG搜索和插件搜索结果
@@ -1527,6 +1528,29 @@ func pluginExtWithContext(ext map[string]interface{}, ctx context.Context, mainC
 	return taskExt
 }
 
+// effectivePluginNames 返回本次请求实际会调用的插件名（小写、排序）：
+// 未指定插件时为全部启用插件，指定时为"请求 ∩ 启用"。与 searchPlugins 的过滤规则一致。
+func (s *SearchService) effectivePluginNames(requested []string) []string {
+	if s.pluginManager == nil {
+		return nil
+	}
+	wanted := make(map[string]bool, len(requested))
+	for _, name := range requested {
+		if name != "" {
+			wanted[strings.ToLower(name)] = true
+		}
+	}
+	names := make([]string, 0, len(s.pluginManager.GetPlugins()))
+	for _, p := range s.pluginManager.GetPlugins() {
+		name := strings.ToLower(p.Name())
+		if len(wanted) == 0 || wanted[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // searchPlugins 搜索插件
 func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRefresh bool, concurrency int, ext map[string]interface{}) ([]model.SearchResult, error) {
 	// 确保ext不为nil
@@ -1539,8 +1563,8 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 		ext["refresh"] = true
 	}
 
-	// 生成缓存键
-	cacheKey := cache.GeneratePluginCacheKey(keyword, plugins, util.ExtDigest(ext))
+	// 生成缓存键：按实际参与搜索的插件集合计算，后台启停插件后不会命中旧集合的缓存
+	cacheKey := cache.GeneratePluginCacheKey(keyword, s.effectivePluginNames(plugins), util.ExtDigest(ext))
 
 	// 如果未启用强制刷新，尝试从缓存获取结果
 	if !forceRefresh && cacheInitialized && config.AppConfig.CacheEnabled {
@@ -1612,7 +1636,7 @@ func (s *SearchService) searchPlugins(keyword string, plugins []string, forceRef
 	// 控制并发数
 	if concurrency <= 0 {
 		// 使用配置中的默认值
-		concurrency = config.AppConfig.DefaultConcurrency
+		concurrency = config.DefaultConcurrency()
 	}
 
 	// 扇出并行度与调用方的 conc 解耦：调用方给得少时补足到任务数（否则 71 个插件会被

@@ -172,17 +172,11 @@ func startServer() {
 	// 初始化插件管理器
 	pluginManager := plugin.NewPluginManager()
 
-	// 注册全局插件（根据配置过滤）
-	if config.AppConfig.AsyncPluginEnabled {
-		pluginManager.RegisterGlobalPluginsWithFilter(config.AppConfig.EnabledPlugins)
-	}
-
-	// 更新默认并发数（如果插件被禁用则使用0）
-	pluginCount := 0
-	if config.AppConfig.AsyncPluginEnabled {
-		pluginCount = len(pluginManager.GetPlugins())
-	}
-	config.UpdateDefaultConcurrency(pluginCount)
+	// 打开后台存储，并按其中的设置启用插件、设置默认频道与默认并发数。
+	// 设置首次由 ENABLED_PLUGINS/CHANNELS 播种，之后以管理后台的修改为准。
+	adminStore := openAdminStore()
+	api.SetAdminStore(adminStore)
+	api.ApplySettings(pluginManager, adminStore.Settings())
 
 	// 初始化搜索服务
 	searchService := service.NewSearchService(pluginManager)
@@ -300,16 +294,16 @@ func printServiceInfo(port string, pluginManager *plugin.PluginManager) {
 
 	// 输出并发信息
 	if os.Getenv("CONCURRENCY") != "" {
-		fmt.Printf("默认并发数: %d (由环境变量CONCURRENCY指定)\n", config.AppConfig.DefaultConcurrency)
+		fmt.Printf("默认并发数: %d (由环境变量CONCURRENCY指定)\n", config.DefaultConcurrency())
 	} else {
-		channelCount := len(config.AppConfig.DefaultChannels)
+		channelCount := len(config.DefaultChannels())
 		pluginCount := 0
 		// 只有插件启用时才计算插件数
 		if config.AppConfig.AsyncPluginEnabled && pluginManager != nil {
 			pluginCount = len(pluginManager.GetPlugins())
 		}
 		fmt.Printf("默认并发数: %d (= 频道数%d + 插件数%d + 10)\n",
-			config.AppConfig.DefaultConcurrency, channelCount, pluginCount)
+			config.DefaultConcurrency(), channelCount, pluginCount)
 	}
 
 	// 输出缓存信息
@@ -392,7 +386,8 @@ func printServiceInfo(port string, pluginManager *plugin.PluginManager) {
 
 	// 只有当插件功能启用时才输出插件信息
 	if config.AppConfig.AsyncPluginEnabled {
-		plugins := pluginManager.GetPlugins()
+		// 复制一份再排序：GetPlugins 返回的是共享快照，不能原地修改
+		plugins := append([]plugin.AsyncSearchPlugin(nil), pluginManager.GetPlugins()...)
 		if len(plugins) > 0 {
 			// 根据新逻辑，只有指定了具体插件才会加载插件
 			fmt.Printf("已启用指定插件 (%d个):\n", len(plugins))
